@@ -76,7 +76,11 @@ The commands are the same in PowerShell, Command Prompt, macOS Terminal, and Lin
 
 ## Anonymize the study
 
-In the browser, open the study and click **Anonymize**. Keep the new name and ID that Orthanc fills in, and confirm. Orthanc applies the Basic Application Level Confidentiality Profile from DICOM PS3.15, Annex E, writes the result as a new study, and keeps the original. The list now shows two studies.
+In the browser, click the study to open it, and click **Anonymize**, the button with a person on it. Keep the new name and ID that Orthanc fills in.
+
+Clear the **StudyDescription** field. The dialog fills it in from the original, and whatever it holds goes into the copy, although the profile removes that tag. Delete the text; the trash icon next to the field doesn't help, because in Orthanc Explorer 2 1.15.0 the dialog still sends the value.
+
+Click **Anonymize**, wait for the bar to fill, click **Close**, and refresh the page. Orthanc applies the Basic Application Level Confidentiality Profile from DICOM PS3.15, Annex E, writes the result as a new study, and keeps the original. The list now shows two studies.
 
 The profile gives each attribute an action from its Table E.1-1:
 
@@ -100,27 +104,27 @@ docker compose run --rm tools compare
 `compare` reads CT image 111 and the screen capture from the original study and from the anonymized copy, and lists what happened to each tag:
 
 ```
-CT image 111: 215 tags before, 77 after
-  Replaced  PatientName                        PAN_03                                       → Anonymized1
-  Replaced  PatientID                          PAN_03                                       → 8e309833-711e-4128-be1f-c1d3315820cf
-  Replaced  DeidentificationMethod             Per DICOM PS 3.15 AnnexE. Details in 0012,0… → Orthanc 1.13.0 - PS 3.15-2023b Table E.1-1 …
+CT image 111: 215 tags before, 78 after
+  Replaced  PatientName                        PAN_03                                       → Anonymized 1a52a67e
+  Replaced  PatientID                          PAN_03                                       → 1a52a67e-ddab-42b9-919f-55179722b724
+  Replaced  DeidentificationMethod             Per DICOM PS 3.15 AnnexE. Details in 0012,0… → Orthanc 1.13.0
   Replaced  5 UIDs: SOPInstanceUID, IrradiationEventUID, StudyInstanceUID, SeriesInstanceUID, FrameOfReferenceUID
-  Emptied   StudyDate, ContentDate, StudyTime, ContentTime, PatientSex
+  Emptied   StudyDate, ContentDate, StudyTime, ContentTime, StudyDescription, PatientSex
   Removed   PatientAge                         025Y
-  Removed   StudyDescription                   Upper-Abdomen +c
+  Removed   SeriesDescription                  1.25mm Pancreas A
   ...
-  Removed   132 more, 122 of them private tags
+  Removed   131 more, 122 of them private tags
 
-Screen capture: 30 tags before, 31 after
+Screen capture: 30 tags before, 32 after
   ...
   Added     PatientIdentityRemoved             YES
-  Added     DeidentificationMethod             Orthanc 1.13.0 - PS 3.15-2023b Table E.1-1 …
+  Added     DeidentificationMethod             Orthanc 1.13.0
   Kept      BurnedInAnnotation                 YES
 ```
 
-Your new ID and UIDs differ, and the number after `Anonymized` goes up each time you anonymize.
+Your new name, ID and UIDs differ: the dialog makes a random ID each time, and the name starts with the ID's first eight characters.
 
-Read both de-identification tags. TCIA had already de-identified this data set, and its De-identification Method Code Sequence (0012,0064) lists the options it used. Orthanc replaces the De-identification Method text (0012,0063) but keeps that sequence, so the copy still says "Retain Longitudinal Temporal Information Modified Dates", although Orthanc emptied the dates.
+Read both de-identification tags. TCIA had already de-identified this data set, and its De-identification Method Code Sequence (0012,0064) lists the options it used. Orthanc replaces the De-identification Method text (0012,0063) but keeps that sequence, so the copy still says "Retain Longitudinal Temporal Information Modified Dates", although Orthanc emptied the dates. The text itself says only `Orthanc 1.13.0`, because the dialog sends its own values for some tags. A plain `POST /studies/{id}/anonymize` with no replacements names the profile: `Orthanc 1.13.0 - PS 3.15-2023b Table E.1-1 Basic Profile`.
 
 ## Text in the pixels
 

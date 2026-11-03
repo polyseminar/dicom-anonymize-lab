@@ -114,7 +114,7 @@ services:
             replaced = [k for k in a if k in b and a[k] != b[k] and b[k][1] != '']
             emptied = [k for k in a if k in b and a[k] != b[k] and b[k][1] == '']
             gone = [k for k in a if k not in b]
-            added = [k for k in b if k not in a]
+            added = [k for k in b if k not in a and b[k][1] != '']
             uids = [k for k in replaced if a[k][0].endswith('UID')]
             for k in sorted(set(replaced) - set(uids), key=lambda k: (k[:4] != '0010', k)):
                 print(f'  Replaced  {a[k][0]:34s} {cut(a[k][1]):{SHOW}s} → {cut(b[k][1])}')
