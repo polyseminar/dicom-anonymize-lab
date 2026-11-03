@@ -1,0 +1,175 @@
+# Polyseminar DICOM anonymize lab: anonymize a study, check every tag that changed, and mask text burned into the pixels.
+# Lab use only. Load public, de-identified test data. Never load real patient data.
+# The same commands work on Windows, macOS, and Linux.
+name: dicom-anonymize-lab
+
+services:
+  pacs:
+    image: orthancteam/orthanc:26.9.1
+    ports:
+      - "127.0.0.1:8042:8042"   # web interface
+      - "127.0.0.1:4242:4242"   # DICOM
+    environment:
+      ORTHANC__NAME: "DICOM anonymize lab"
+      ORTHANC_PASSWORD: "orthanc"                  # user: orthanc, password: orthanc
+      OHIF_PLUGIN_ENABLED: "true"
+      DICOM_WEB_PLUGIN_ENABLED: "true"             # the OHIF viewer needs it
+      PIXELS_MASKER_PLUGIN_ENABLED: "true"         # masks regions of the pixel data; used by "mask"
+    volumes:
+      - pacs-data:/var/lib/orthanc/db
+    healthcheck:
+      test: ["CMD", "/probes/test-aliveness.py"]
+      interval: 5s
+      retries: 12
+
+  # One-off helper: downloads the public test study into the "study" volume
+  # Run with: docker compose run --rm download
+  download:
+    image: python:3.12-slim
+    profiles: ["tools"]
+    working_dir: /study
+    volumes:
+      - study:/study
+    # Install the IDC download tool, fetch one patient, list the folders
+    command:
+      - sh
+      - -c
+      - >-
+        pip install --quiet --disable-pip-version-check --root-user-action=ignore idc-index==0.12.5
+        && idc download PAN_03
+        && find ctpred_sunitinib_pannet -maxdepth 3 -type d
+
+  # One-off helper: DCMTK, the DICOM command-line tools, and four lab scripts
+  # Run with: docker compose run --rm tools load (then compare, mask)
+  tools:
+    build:
+      dockerfile_inline: |
+        FROM debian:trixie-20261005-slim
+        RUN apt-get update && apt-get install -y --no-install-recommends dcmtk python3-pil fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+
+        # make-capture: one CT slice as a screen capture with the patient's name, ID and study date
+        # written into the pixels, the way some workstations label one
+        COPY --chmod=755 <<'EOF' /usr/local/bin/make-capture
+        #!/bin/sh
+        set -e
+        for f in PAN_03/*/*/*.dcm; do
+          if dcmdump +P StudyDate +P InstanceNumber "$$f" | tr -d '\n' | grep -q '20040110.*\[111\]'; then break; fi
+        done
+        dcm2img --quiet --write-bmp --use-window 1 "$$f" /tmp/slice.bmp
+        label="$$(dcmdump +P PatientName +P PatientID +P StudyDate "$$f" | sed 's/.*\[\(.*\)\].*/\1/' | tr '\n' ' ')"
+        python3 -c "import sys; from PIL import Image, ImageDraw, ImageFont; im = Image.open('/tmp/slice.bmp').convert('RGB'); ImageDraw.Draw(im).text((10, 10), sys.argv[1], fill='white', font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 18)); im.save('/tmp/slice.bmp')" "$$label"
+        img2dcm --quiet -i BMP --study-from "$$f" -k "Modality=OT" -k "SeriesDescription=Screen capture" -k "SeriesNumber=900" -k "BurnedInAnnotation=YES" /tmp/slice.bmp /work/sc.dcm
+        echo "$$f"
+        EOF
+
+        # load: sends the newer CT study and the screen capture to the PACS
+        COPY --chmod=755 <<'EOF' /usr/local/bin/load
+        #!/bin/sh
+        set -e
+        study="$$(dirname "$$(dirname "$$(make-capture)")")"
+        storescu -aec ORTHANC +sd +r pacs 4242 "$$study" /work/sc.dcm
+        echo "Sent $$(find "$$study" -name '*.dcm' | wc -l) CT images and 1 screen capture to the PACS"
+        EOF
+
+        # compare: one CT image and the screen capture, before and after anonymization,
+        # grouped by what happened to each tag
+        COPY --chmod=755 <<'EOF' /usr/local/bin/compare
+        #!/usr/bin/env python3
+        import base64, json, urllib.request
+
+        AUTH = 'Basic ' + base64.b64encode(b'orthanc:orthanc').decode()
+        SHOW = 44                                    # characters of each value
+
+        def get(path):
+            req = urllib.request.Request('http://pacs:8042' + path, headers={'Authorization': AUTH})
+            return json.loads(urllib.request.urlopen(req).read())
+
+        def instance(study, modality, number):
+            for s in study['Series']:
+                series = get(f'/series/{s}')
+                if series['MainDicomTags'].get('Modality') != modality: continue
+                for i in series['Instances']:
+                    if number is None or get(f'/instances/{i}/simplified-tags').get('InstanceNumber') == number: return i
+
+        def tags(i):
+            return {k: (v['Name'], v['Value'] if v['Type'] == 'String' else f"<{v['Type'].lower()}>")
+                    for k, v in get(f'/instances/{i}/tags').items() if k != '7fe0,0010'}
+
+        def cut(v):
+            v = str(v)
+            return v if len(v) <= SHOW else v[:SHOW - 1] + '…'
+
+        def private(k): return int(k[:4], 16) % 2 == 1
+
+        copies = [s for s in (get(f'/studies/{s}') for s in get('/studies')) if 'AnonymizedFrom' in s]
+        if not copies: raise SystemExit('No anonymized study yet: anonymize the study in the browser first.')
+        anon = max(copies, key=lambda s: s['LastUpdate'])           # the newest copy
+        orig = get(f"/studies/{anon['AnonymizedFrom']}")
+
+        for label, modality, number in (('CT image 111', 'CT', '111'), ('Screen capture', 'OT', None)):
+            i, j = instance(orig, modality, number), instance(anon, modality, number)
+            if not (i and j): continue
+            a, b = tags(i), tags(j)
+            print(f'{label}: {len(a)} tags before, {len(b)} after')
+            replaced = [k for k in a if k in b and a[k] != b[k] and b[k][1] != '']
+            emptied = [k for k in a if k in b and a[k] != b[k] and b[k][1] == '']
+            gone = [k for k in a if k not in b]
+            added = [k for k in b if k not in a]
+            uids = [k for k in replaced if a[k][0].endswith('UID')]
+            for k in sorted(set(replaced) - set(uids), key=lambda k: (k[:4] != '0010', k)):
+                print(f'  Replaced  {a[k][0]:34s} {cut(a[k][1]):{SHOW}s} → {cut(b[k][1])}')
+            if uids: print(f"  Replaced  {len(uids)} UIDs: {', '.join(a[k][0] for k in uids)}")
+            for k in added: print(f'  Added     {b[k][0]:34s} {cut(b[k][1])}')
+            if emptied: print(f"  Emptied   {', '.join(a[k][0] for k in emptied)}")
+            named = [k for k in gone if not private(k) and a[k][1] not in ('', '<sequence>')]
+            named = sorted(named, key=lambda k: (not k.startswith('0010'), 'Description' not in a[k][0], 'Date' not in a[k][0]))[:6]
+            for k in named: print(f'  Removed   {a[k][0]:34s} {cut(a[k][1])}')
+            if len(gone) > len(named): print(f'  Removed   {len(gone) - len(named)} more, {sum(private(k) for k in gone)} of them private tags')
+            if '0028,0301' in b and a.get('0028,0301') == b['0028,0301']: print(f"  Kept      {b['0028,0301'][0]:34s} {b['0028,0301'][1]}")
+            print()
+        EOF
+
+        # mask x0 y0 x1 y1: fills that box with black in the anonymized study's screen capture,
+        # with Orthanc's pixels masker plugin, and sets Burned In Annotation to NO.
+        # The plugin needs the box: it doesn't find text by itself.
+        COPY --chmod=755 <<'EOF' /usr/local/bin/mask
+        #!/usr/bin/env python3
+        import base64, json, sys, urllib.request
+
+        AUTH = 'Basic ' + base64.b64encode(b'orthanc:orthanc').decode()
+
+        def call(method, path, body=None):
+            req = urllib.request.Request('http://pacs:8042' + path, method=method, headers={'Authorization': AUTH},
+                                         data=None if body is None else json.dumps(body).encode())
+            return json.loads(urllib.request.urlopen(req).read() or 'null')
+
+        if len(sys.argv) != 5: raise SystemExit('Usage: mask x0 y0 x1 y1 (pixels, from the top left corner)')
+        x0, y0, x1, y1 = map(int, sys.argv[1:])
+        copies = [s for s in (call('GET', f'/studies/{s}') for s in call('GET', '/studies')) if 'AnonymizedFrom' in s]
+        if not copies: raise SystemExit('No anonymized study yet: anonymize the study in the browser first.')
+        anon = max(copies, key=lambda s: s['LastUpdate'])               # the newest copy
+        for s in anon['Series']:
+            if call('GET', f'/series/{s}')['MainDicomTags'].get('Modality') != 'OT': continue
+            # The plugin writes a new series. Its KeepSource false deletes the source and then fails
+            # (pixels masker 0.1.4), so the old series is deleted here, once the new one is stored.
+            job = call('POST', f'/plugins/pixels-masker/series/{s}/modify', {
+                'Replace': {'BurnedInAnnotation': 'NO'}, 'Force': True,
+                'MaskPixelData': {'Regions': [{'MaskType': 'Fill', 'FillValue': 0, 'RegionType': '2D',
+                                               'Origin': [x0, y0], 'End': [x1, y1]}]}})
+            if job.get('FailedInstancesCount') or not job.get('InstancesCount'): raise SystemExit(f'Masking failed: {job}')
+            call('DELETE', f'/series/{s}')
+            print(f"Masked {x0},{y0} to {x1},{y1} in the screen capture of {anon['PatientMainDicomTags'].get('PatientName')}. Burned In Annotation is now NO.")
+        EOF
+    profiles: ["tools"]
+    depends_on:
+      pacs:
+        condition: service_healthy
+    working_dir: /study/ctpred_sunitinib_pannet
+    volumes:
+      - study:/study:ro
+      - work:/work
+
+volumes:
+  pacs-data:   # the PACS database and stored images
+  study:       # the downloaded test study
+  work:        # files the tools helper makes, such as /work/sc.dcm
