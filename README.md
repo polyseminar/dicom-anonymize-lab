@@ -4,6 +4,8 @@ Anonymize a DICOM study with the Basic profile from the DICOM standard, check ev
 
 This lab goes with the Polyseminar video "Anonymize DICOM images: tags and burned-in text". It is the fourth lab in the series, after [`pacs-lab`](https://github.com/polyseminar/pacs-lab), [`dicom-send-lab`](https://github.com/polyseminar/dicom-send-lab) and [`dicom-errors-lab`](https://github.com/polyseminar/dicom-errors-lab). This one stands alone, so you don't need the others.
 
+The [lab page](https://polyseminar.com/labs/anonymize-a-dicom-study) on polyseminar.com has the video, its chapters, and the main commands.
+
 > **Lab use only.** Load only the public test data named below. Never load real patient data, including your own scans, and never point these tools at a hospital system without permission. This lab teaches the method; it is not a validated de-identification tool, and this README is not legal advice.
 
 ## What you need
